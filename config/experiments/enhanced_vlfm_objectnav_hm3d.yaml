@@ -1,0 +1,132 @@
+# 修改配置文件引用方式 - 方案A：直接引用基础配置
+defaults:
+  - vlfm_objectnav_hm3d  # 基础配置继承
+  - _self_  # 确保这个配置优先级更高
+
+# 全局参数
+max_steps: 300  # 最大步数
+use_mm_nav: true  # 暂时禁用MM-Nav
+use_ua_explore: false  # 暂时禁用UA-Explore
+enable_memory_repulsion: true  # 暂时禁用记忆排斥
+
+# 协调器配置
+coordinator:
+  memory_weight: 0.6  # MM-Nav权重
+  uncertainty_weight: 0.7  # UA-Explore权重
+  cycle_threshold: 8  # 循环检测阈值
+  intervention_levels: 3  # 干预级别数量
+
+# 自适应探索配置
+adaptive_explorer:
+  base_max_steps: 300  # 基础最大步数
+  exploration_threshold: 0.15  # 探索效率阈值
+  stagnation_threshold: 30  # 停滞阈值
+
+# 简化的记忆模块配置 (MM-Nav)
+mm_nav_buffer_size: 100
+mm_nav_feature_dim: 512
+mm_nav_enable_forgetting: true
+mm_nav_importance_threshold: 0.3
+mm_nav_temporal_decay: 0.96
+mm_nav_repulsion_radius: 2.0
+
+# 简化的不确定性模块配置 (UA-Explore)
+ua_explore_initial_threshold: 0.5
+ua_explore_min_threshold: 0.1
+ua_explore_threshold_decay: 0.98
+ua_explore_use_visual_entropy: true
+ua_explore_boost_factor: 1.5
+ua_explore_exploration_boost: 0.3
+
+# 将配置参数直接设置到策略参数中，而不使用复杂的嵌套结构
+memory_config_buffer_size: 100
+memory_config_feature_dim: 512
+memory_config_enable_forgetting: true
+memory_config_importance_threshold: 0.3
+memory_config_temporal_decay: 0.96
+memory_config_repulsion_radius: 2.0
+
+uncertainty_config_initial_threshold: 0.5
+uncertainty_config_min_threshold: 0.1
+uncertainty_config_threshold_decay: 0.98
+uncertainty_config_use_visual_entropy: true
+uncertainty_config_boost_factor: 1.5
+uncertainty_config_exploration_boost: 0.3
+
+# 策略配置
+policy:
+  name: "HabitatITMPolicyV2"  # 保持策略类名称不变
+  _target_: "vlfm.policy.habitat_policies.HabitatITMPolicyV2"
+  
+  # 直接在配置中设置功能开关
+  use_mm_nav: true  # 从环境变量获取，默认false
+  use_ua_explore: ${oc.env:VLFM_USE_UNCERTAINTY,false}
+  use_llm_gsp: ${oc.env:VLFM_USE_LLM_GSP,false}
+  enable_memory_repulsion: true
+  enable_cycle_detection: true
+  enable_adaptive_explorer: ${oc.env:VLFM_ADAPTIVE_EXPLORER,false}
+  
+  # 模块配置
+  memory_config:
+    max_memory_size: 1000
+    repulsion_radius: ${oc.env:VLFM_MEMORY_REPULSION_RADIUS,2.0}
+    position_threshold: 0.5
+    decay_factor: 0.98
+    log_enabled: true
+  
+  uncertainty_config:
+    initial_threshold: 0.5
+    threshold_decay: 0.98
+    use_visual_entropy: true
+    log_enabled: true
+    
+  explorer_config:
+    base_max_steps: ${oc.env:VLFM_MAX_STEPS,250}
+    exploration_threshold: 0.15
+    log_enabled: true
+    
+  semantic_config:
+    use_gpt4o: ${oc.env:VLFM_USE_GPT4O,false}
+    temperature: ${oc.env:VLFM_LLM_TEMPERATURE,0.3}
+    vision_detail: ${oc.env:VLFM_LLM_VISION_DETAIL,"auto"}
+    log_enabled: true
+    
+  coordinator_config:
+    memory_weight: 0.4
+    uncertainty_weight: 0.3
+    semantic_weight: 0.3
+    log_enabled: true
+
+# 调整日志级别以看到我们的输出
+habitat:
+  simulator:
+    debug_render: true
+  
+  trainer:
+    test_episodes: 50  # 测试集大小 
+
+feature_extractor:
+  use_view_invariant_features: true
+  feature_extractor_config:
+    feature_dim: 512
+    device: "cuda:0"  # 或"cpu"
+    image_size: [224, 224] 
+
+# 日志配置
+logging:
+  level: INFO  # 日志级别
+  write_to_file: true  # 写入文件
+  log_dir: "logs"  # 日志目录 
+
+# 系统设置
+system:
+  max_steps: 300  # 最大步数
+  log_level: "INFO"  # 日志级别
+  seed: 42  # 随机种子
+
+# 决策整合配置
+decision:
+  use_adaptive_weights: true  # 使用自适应权重
+  early_phase_threshold: 0.3  # 早期阶段阈值
+  late_phase_threshold: 0.7  # 后期阶段阈值
+  cycle_detection: true  # 启用循环检测 
