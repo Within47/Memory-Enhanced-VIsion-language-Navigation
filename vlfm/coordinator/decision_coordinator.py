@@ -1,8 +1,3 @@
-"""
-决策协调器和循环检测器模块
-
-优化MM-Nav和UA-Explore两大创新点的协同效果，提高SR和SPL指标
-"""
 
 from typing import Dict, List, Tuple, Any, Optional, Union, Set
 import numpy as np
@@ -246,13 +241,9 @@ class DecisionCoordinator:
         """
         self.config = config or type('Config', (), {})
         
-        # 使用与ITMPolicyV2相同的属性名
         self.use_mm_nav = getattr(self.config, 'use_mm_nav', False)
-        self.use_ua_explore = getattr(self.config, 'use_ua_explore', False)
-        self.use_llm_gsp = getattr(self.config, 'use_llm_gsp', False)
         self.enable_memory_repulsion = getattr(self.config, 'enable_memory_repulsion', False)
         self.enable_cycle_detection = getattr(self.config, 'enable_cycle_detection', False)
-        self.enable_adaptive_explorer = getattr(self.config, 'enable_adaptive_explorer', False)
 
         
         # Load configuration
@@ -398,7 +389,7 @@ class DecisionCoordinator:
             if hasattr(self, 'decision_history'):
                 self.decision_history.append(decision_record)
             self.step_counter += 1
-            
+
             # 在这里添加详细的整合日志
             active_count = len(active_modules)
             if active_count > 0:
