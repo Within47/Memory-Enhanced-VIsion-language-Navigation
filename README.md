@@ -5,7 +5,7 @@
 ## Table of Contents
 
 - [1. Project Overview: A New Paradigm of Cognitive Navigation](#1-project-overview-a-new-paradigm-of-cognitive-navigation)
-- [2. Setup and Configuration Guide](#3-setup-and-configuration-guide)
+- [2. Setup and Configuration Guide](#2-setup-and-configuration-guide)
 
 ---
 ## 1. Project Overview: A New Paradigm of Cognitive Navigation
