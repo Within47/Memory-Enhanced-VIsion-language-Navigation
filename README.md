@@ -51,10 +51,10 @@ Usage:
 bash ./scripts/run_vlfm_test.sh [MODE] [MAX_STEPS]
 
 Example: Run full mode with a maximum of 500 steps
-```bash
+
 bash ./scripts/run_vlfm_test.sh MM-Nav_UA-Nav 500
 
 Example: Run MM-Nav only with 300 steps
-```bash
+
 bash ./scripts/run_vlfm_test.sh MM-Nav 300
 
