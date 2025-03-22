@@ -57,16 +57,16 @@ Ensure the following software environments and libraries are installed:
    conda create -n MM_UA python=3.8
 ### 2.2 How to Run the System
 Script path:```bash scripts/run_vlfm_test.sh
-### Usage:
+Usage:
    ```bash
    bash ./scripts/run_vlfm_test.sh [MODE] [MAX_STEPS]
 
-### Example: Run full mode with a maximum of 500 steps
+Example: Run full mode with a maximum of 500 steps
 
    ```bash
    bash ./scripts/run_vlfm_test.sh MM-Nav_UA-Nav 500
 
-### Example: Run MM-Nav only with 300 steps
+Example: Run MM-Nav only with 300 steps
 
    ```bash
    bash ./scripts/run_vlfm_test.sh MM-Nav 300
