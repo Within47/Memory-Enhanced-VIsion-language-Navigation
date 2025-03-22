@@ -1,5 +1,4 @@
 # Memory-Enhanced-VIsion-language-Navigation
-> *This document provides a systematic analysis of the **VLFM project architecture**, core technologies, and code implementation, aiming to help researchers and developers gain an in-depth understanding of this intelligent navigation system.*
 
 ---
 
