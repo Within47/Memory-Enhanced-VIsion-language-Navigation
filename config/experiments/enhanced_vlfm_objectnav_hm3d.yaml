@@ -19,8 +19,8 @@ coordinator:
 # 自适应探索配置
 adaptive_explorer:
   base_max_steps: 300  # 基础最大步数
-  exploration_threshold: 0.15  # 探索效率阈值
-  stagnation_threshold: 30  # 停滞阈值
+  exploration_threshold: 0.2  # 探索效率阈值
+  stagnation_threshold: 15  # 停滞阈值
 
 # 简化的记忆模块配置 (MM-Nav)
 mm_nav_buffer_size: 100
@@ -61,7 +61,6 @@ policy:
   # 直接在配置中设置功能开关
   use_mm_nav: true  # 从环境变量获取，默认false
   use_ua_explore: ${oc.env:VLFM_USE_UNCERTAINTY,false}
-  use_llm_gsp: ${oc.env:VLFM_USE_LLM_GSP,false}
   enable_memory_repulsion: true
   enable_cycle_detection: true
   enable_adaptive_explorer: ${oc.env:VLFM_ADAPTIVE_EXPLORER,false}
@@ -71,30 +70,25 @@ policy:
     max_memory_size: 1000
     repulsion_radius: ${oc.env:VLFM_MEMORY_REPULSION_RADIUS,2.0}
     position_threshold: 0.5
-    decay_factor: 0.98
+    decay_factor: 0.9
     log_enabled: true
   
   uncertainty_config:
     initial_threshold: 0.5
-    threshold_decay: 0.98
+    threshold_decay: 0.9
     use_visual_entropy: true
     log_enabled: true
     
   explorer_config:
     base_max_steps: ${oc.env:VLFM_MAX_STEPS,250}
-    exploration_threshold: 0.15
+    exploration_threshold: 0.1
     log_enabled: true
-    
-  semantic_config:
-    use_gpt4o: ${oc.env:VLFM_USE_GPT4O,false}
-    temperature: ${oc.env:VLFM_LLM_TEMPERATURE,0.3}
-    vision_detail: ${oc.env:VLFM_LLM_VISION_DETAIL,"auto"}
-    log_enabled: true
+
     
   coordinator_config:
-    memory_weight: 0.4
-    uncertainty_weight: 0.3
-    semantic_weight: 0.3
+    memory_weight: 0.2
+    uncertainty_weight: 0.8
+    semantic_weight: 0
     log_enabled: true
 
 # 调整日志级别以看到我们的输出
@@ -122,11 +116,11 @@ logging:
 system:
   max_steps: 300  # 最大步数
   log_level: "INFO"  # 日志级别
-  seed: 42  # 随机种子
+  seed: 36  # 随机种子
 
 # 决策整合配置
 decision:
   use_adaptive_weights: true  # 使用自适应权重
-  early_phase_threshold: 0.3  # 早期阶段阈值
-  late_phase_threshold: 0.7  # 后期阶段阈值
+  early_phase_threshold: 0.35  # 早期阶段阈值
+  late_phase_threshold: 0.75  # 后期阶段阈值
   cycle_detection: true  # 启用循环检测 
