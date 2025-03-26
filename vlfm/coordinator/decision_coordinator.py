@@ -1,3 +1,8 @@
+"""
+决策协调器和循环检测器模块
+
+优化MM-Nav和UA-Explore两大创新点的协同效果，提高SR和SPL指标
+"""
 
 from typing import Dict, List, Tuple, Any, Optional, Union, Set
 import numpy as np
@@ -241,15 +246,19 @@ class DecisionCoordinator:
         """
         self.config = config or type('Config', (), {})
         
+        # 使用与ITMPolicyV2相同的属性名
         self.use_mm_nav = getattr(self.config, 'use_mm_nav', False)
+        self.use_ua_explore = getattr(self.config, 'use_ua_explore', False)
         self.enable_memory_repulsion = getattr(self.config, 'enable_memory_repulsion', False)
         self.enable_cycle_detection = getattr(self.config, 'enable_cycle_detection', False)
+        self.enable_adaptive_explorer = getattr(self.config, 'enable_adaptive_explorer', False)
+        
 
         
         # Load configuration
-        self.memory_weight = getattr(self.config, 'memory_weight', 0.3)
-        self.uncertainty_weight = getattr(self.config, 'uncertainty_weight', 0.3)
-        self.semantic_weight = getattr(self.config, 'semantic_weight', 0.4)
+        self.memory_weight = getattr(self.config, 'memory_weight', 0.2)
+        self.uncertainty_weight = getattr(self.config, 'uncertainty_weight', 0.8)
+        self.semantic_weight = getattr(self.config, 'semantic_weight', 0)
         self.cycle_threshold = getattr(self.config, 'cycle_threshold', 8)
         
         # Initialize state tracking
@@ -285,7 +294,6 @@ class DecisionCoordinator:
         self.performance_metrics = {
             'memory_influence': 0.0,
             'uncertainty_influence': 0.0,
-            'semantic_influence': 0.0,
             'conflicts_detected': 0,
             'interventions_applied': 0
         }
@@ -297,7 +305,6 @@ class DecisionCoordinator:
         self.error_counts = {
             'memory_errors': 0,
             'uncertainty_errors': 0,
-            'semantic_errors': 0,
             'integration_errors': 0
         }
         self.max_errors = 5  # 每个模块最大允许错误次数
@@ -312,9 +319,11 @@ class DecisionCoordinator:
         try:
             # 安全获取参数
             memory = kwargs.get('memory')
+            uncertainty_estimator = kwargs.get('uncertainty_estimator')
             frontiers = kwargs.get('frontiers')
             observation = kwargs.get('observation')
-
+            adaptive_explorer = kwargs.get('adaptive_explorer')
+            
             if frontiers is None or len(frontiers) == 0:
                 logger.warning("没有前沿点可供评估")
                 return base_values
@@ -327,6 +336,7 @@ class DecisionCoordinator:
             contributions = {
                 'base': base_values.copy(),
                 'memory': None,
+                'uncertainty': None,
             }
             
             active_modules = []
@@ -342,14 +352,31 @@ class DecisionCoordinator:
                     
                     # 记录差异
                     memory_diff = np.mean(np.abs(memory_values - base_values))
-                    # logger.info(f"空间记忆贡献: 平均差异={memory_diff:.4f}")
+                    logger.info(f"空间记忆贡献: 平均差异={memory_diff:.4f}")
                 except Exception as e:
                     logger.error(f"记忆贡献计算失败: {str(e)}")
+            
+            # 2. 计算不确定性贡献
+            if self.use_ua_explore and uncertainty_estimator is not None:
+                try:
+                    uncertainty_values = self._apply_uncertainty_contribution(
+                        uncertainty_estimator, frontiers, base_values.copy(), observation, adaptive_explorer)
+                    contributions['uncertainty'] = uncertainty_values
+                    active_modules.append('uncertainty')
+                    module_weights['uncertainty'] = self.uncertainty_weight
+                    
+                    # 记录差异
+                    uncertainty_diff = np.mean(np.abs(uncertainty_values - base_values))
+                    logger.info(f"不确定性贡献: 平均差异={uncertainty_diff:.4f}")
+                except Exception as e:
+                    logger.error(f"不确定性贡献计算失败: {str(e)}")
+            
 
+            
             # 核心修复：加权组合所有模块的贡献
             if active_modules:
                 # 初始化为基础值的一部分权重
-                base_weight = 0.2  # 给基础值保留20%的权重
+                base_weight = 0.15  # 给基础值保留20%的权重
                 enhanced_values = base_values.copy() * base_weight
                 
                 # 计算剩余权重
@@ -366,13 +393,13 @@ class DecisionCoordinator:
                         enhanced_values += contributions[module] * normalized_weight
                         
                         # 记录实际应用的权重
-                        # logger.info(f"{module}贡献应用: 权重={normalized_weight:.3f}")
+                        logger.info(f"{module}贡献应用: 权重={normalized_weight:.3f}")
                 else:
                     # 如果没有有效的模块权重，使用平均权重
                     for module in active_modules:
                         weight = remaining_weight / len(active_modules)
                         enhanced_values += contributions[module] * weight
-                        # logger.info(f"{module}贡献应用: 权重={weight:.3f}")
+                        logger.info(f"{module}贡献应用: 权重={weight:.3f}")
             
             # 确保最终值限制在[0,1]范围
             enhanced_values = np.clip(enhanced_values, 0.0, 1.0)
@@ -389,23 +416,24 @@ class DecisionCoordinator:
             if hasattr(self, 'decision_history'):
                 self.decision_history.append(decision_record)
             self.step_counter += 1
-
+            
             # 在这里添加详细的整合日志
             active_count = len(active_modules)
             if active_count > 0:
-                logger.info(f"{active_count} module contributions have been integrated:")
+                logger.info(f"已整合 {active_count} 个模块贡献:")
                 for module in active_modules:
                     module_diff = np.mean(np.abs(contributions[module] - base_values)) if contributions[module] is not None else 0
                     module_weight = module_weights.get(module, 0)
-                    logger.info(f"  - {module}: difference={module_diff:.4f}, weight={module_weight:.2f}")
+                    logger.info(f"  - {module}: 差异={module_diff:.4f}, 权重={module_weight:.2f}")
                 
                 # 计算最终整合效果
                 final_diff = np.mean(np.abs(enhanced_values - base_values))
-
+                logger.info(f"最终整合效果: 与基础值平均差异={final_diff:.4f}")
+            
             return enhanced_values
             
         except Exception as e:
-            logger.error(f"module contributions integration falied: {str(e)}")
+            logger.error(f"决策整合失败: {str(e)}")
             import traceback
             logger.error(traceback.format_exc())
             return base_values
@@ -474,22 +502,164 @@ class DecisionCoordinator:
             logger.error(f"记忆贡献计算失败: {str(e)}")
             return values
 
+    def _apply_uncertainty_contribution(self, uncertainty_estimator, frontiers, values, observation, adaptive_explorer):
+        """动态平衡的不确定性贡献"""
+        try:
+            # 获取不确定性信息
+            uncertainty_info = uncertainty_estimator.estimate(frontiers, observation)
+            uncertainties = uncertainty_info.get('frontier_uncertainties', [])
+
+            if not uncertainties or len(uncertainties) == 0:
+                return values
+
+            # 确保长度一致
+            uncertainties = np.array(uncertainties[:len(values)])
+            
+            # 基础权重设置
+            base_uncertainty_weight = 0.4
+
+            # 1. 根据任务进度动态调整权重
+            progress = observation.get('progress', self.step_counter / 500)
+            progress_factor = min(1.0, progress * 1.5)
+            progress_adjusted_weight = base_uncertainty_weight * (1.0 - progress_factor * 0.6)
+
+            # 2. 检查是否有高置信度目标检测
+            detection_factor = 1.0
+            if 'object_detections' in observation:
+                detections = observation.get('object_detections')
+                if hasattr(detections, 'scores') and len(detections.scores) > 0:
+                    max_score = max(detections.scores) if len(detections.scores) > 0 else 0
+                    if max_score > 0.6:
+                        detection_factor = 0.3
+                    elif max_score > 0.4:
+                        detection_factor = 0.5
+
+            # 最终权重计算
+            uncertainty_weight = progress_adjusted_weight * detection_factor
+
+            # 设置默认策略 - 关键修复点：确保strategy变量总是有值
+            strategy = 'balanced'
+
+            # 策略确定
+            if progress < 0.25:
+                strategy = 'explore'
+            elif progress > 0.5 or detection_factor < 0.5:
+                strategy = 'exploit'
+            # 不需要else语句，因为我们已经设置了默认值
+
+            # 记录调试信息
+            logger.info(f"UA-Nav参数: 权重={uncertainty_weight:.3f}, 策略={strategy}, 进度={progress:.2f}")
+
+            # 创建增强值
+            enhanced_values = np.array(values.copy())
+
+            # 应用不确定性贡献 (根据策略)
+            if strategy == 'explore':
+                # 探索模式：高不确定性提升价值
+                enhanced_values = enhanced_values * (1 - uncertainty_weight) + uncertainties * uncertainty_weight
+            elif strategy == 'exploit':
+                # 利用模式：低不确定性提升价值
+                enhanced_values = enhanced_values * (1 - uncertainty_weight) + (1 - uncertainties) * uncertainty_weight
+            else:  # balanced
+                # 平衡模式：值高的区域降低不确定性，值低的区域增加不确定性
+                for i in range(len(enhanced_values)):
+                    if enhanced_values[i] > 0.6:  # 高价值区域
+                        enhanced_values[i] = enhanced_values[i] * (1 - uncertainty_weight * 0.5) + (
+                                    1 - uncertainties[i]) * uncertainty_weight * 0.5
+                    else:  # 低价值区域
+                        enhanced_values[i] = enhanced_values[i] * (1 - uncertainty_weight) + uncertainties[
+                            i] * uncertainty_weight
+
+            # 记录贡献差异
+            mean_diff = np.mean(np.abs(enhanced_values - values))
+            logger.info(f"不确定性贡献: 平均差异={mean_diff:.4f}")
+
+            # 确保返回的是numpy数组
+            if not isinstance(enhanced_values, np.ndarray):
+                enhanced_values = np.array(enhanced_values)
+            return enhanced_values
+        except Exception as e:
+            logger.error(f"不确定性贡献计算失败: {str(e)}")
+            import traceback
+            logger.error(traceback.format_exc())  # 添加详细错误信息
+            
+            # 确保返回的是numpy数组
+            if not isinstance(values, np.ndarray):
+                values = np.array(values)
+            return values
+    
+    def _compute_uncertainty_gradients(self, frontiers, uncertainties):
+        """计算不确定性梯度场"""
+        gradients = np.zeros(len(frontiers))
+        try:
+            if len(frontiers) <= 1:
+                return gradients
+            
+            # 计算每个点的局部梯度
+            for i, frontier in enumerate(frontiers):
+                # 找出近邻点
+                distances = np.array([np.linalg.norm(frontier - f) for f in frontiers])
+                # 排除自身
+                distances[i] = np.inf
+                # 获取最近的3个点
+                nearest_indices = np.argsort(distances)[:3]
+                if len(nearest_indices) == 0:
+                    continue
+                    
+                # 计算梯度：不确定性变化/距离变化
+                neighbor_uncertainties = uncertainties[nearest_indices]
+                neighbor_distances = distances[nearest_indices]
+                
+                # 防止除零
+                neighbor_distances = np.maximum(neighbor_distances, 0.1)
+                
+                # 计算加权梯度
+                uncertainty_diffs = neighbor_uncertainties - uncertainties[i]
+                weighted_diffs = uncertainty_diffs / neighbor_distances
+                gradients[i] = np.mean(weighted_diffs)
+                
+            return gradients
+        except Exception as e:
+            logger.error(f"计算不确定性梯度失败: {str(e)}")
+            return np.zeros(len(frontiers))
+        
+
+    
+    def update_action(self, action: int):
+        """
+        Update action history
+        
+        Args:
+            action: Latest action taken
+        """
+        self.action_history.append(action)
+        self.step_counter += 1
+        
+        # Keep a reasonable history size
+        if len(self.action_history) > 100:
+            self.action_history = self.action_history[-100:]
+    
+
     def reset(self):
         """Reset coordinator state"""
         self.step_counter = 0
         self.action_history = []
         self.position_history = []
         self.success_found = False
-
+        
         # Reset cycle detector
         self.cycle_detector.reset()
-
+        
         # Reset statistics
         self.stats = {
             'memory_usage': 0,
+            'uncertainty_usage': 0,
+            'semantic_usage': 0,
             'cycle_interventions': 0,
             'total_decision_time': 0,
             'decisions': 0
         }
-
+        
         logger.info("Decision Coordinator reset")
+    
+
