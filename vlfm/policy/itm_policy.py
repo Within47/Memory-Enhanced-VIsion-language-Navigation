@@ -27,6 +27,7 @@ except Exception:
     pass
 
 from vlfm.memory import SpatialMemory
+from vlfm.uncertainty import UncertaintyEstimator, AdaptiveExplorer
 from vlfm.coordinator import DecisionCoordinator
 
 
@@ -67,14 +68,17 @@ class BaseITMPolicy(BaseObjectNavPolicy):
         )
         self._acyclic_enforcer = AcyclicEnforcer()
 
+        # 添加目标验证所需属性 (新增)
         self._confidence_history = deque(maxlen=5)
         self._target_found = False
         self._exploration_coverage = 0.0
         self._last_stagnation_recovery = 0
 
+        # 记录最近位置用于停滞检测
         self._position_history = deque(maxlen=10)
 
-        self._step_counter = 0
+        # 确保步数计数器初始化
+        self._step_counter = 0  # 这是原有的变量，不是_step_count
 
     def _reset(self) -> None:
         super()._reset()
@@ -84,60 +88,77 @@ class BaseITMPolicy(BaseObjectNavPolicy):
         self._last_frontier = np.zeros(2)
 
     def _explore(self, observations: Union[Dict[str, Tensor], "TensorDict"]) -> Tensor:
-        global logger # make sure global logger
+        """增强的探索逻辑，多阶段策略"""
+        # 确保全局logger可用
+        global logger  # 可以添加这行确保使用全局logger
 
         frontiers = self._observations_cache["frontier_sensor"]
+
+        # 安全调用探索阶段判断
         try:
             exploration_phase = self._get_exploration_phase()
         except AttributeError:
+            # 如果方法不存在或出错，使用默认值
             exploration_phase = "standard"
         except Exception as e:
-            logger.error(f"exploration_phase stage failure: {str(e)}")
+            logger.error(f"获取探索阶段失败: {str(e)}")
             exploration_phase = "standard"
+
+        # 检查是否有前沿点
         if np.array_equal(frontiers, np.zeros((1, 2))) or len(frontiers) == 0:
-            logger.warning("Didnot find any frontier, stop exploring!")
+            logger.warning("没有找到前沿点，探索停止")
             return self._stop_action
+
+        # 获取最佳前沿点
         best_frontier, best_value = self._get_best_frontier(observations, frontiers)
 
-        # detect stagnation and restoring
+        # 探索停滞检测与恢复 - 新增
         if self._detect_exploration_stagnation():
-            logger.warning(f"stagnation detecting: stage={exploration_phase}, step={self._step_count}")
-            # restoring
+            logger.warning(f"探索停滞检测: 当前阶段={exploration_phase}, 步数={self._step_count}")
+            # 停滞恢复策略
             if hasattr(self, '_last_stagnation_recovery') and self._step_count - self._last_stagnation_recovery < 10:
-                # stagnate in a short time, adopt a more severe strategy
-                logger.info("stagnate in a short time, randomly explore")
+                # 短时间内再次停滞，采用更激进策略
+                logger.info("连续停滞，启用随机探索")
+                # 随机选择未探索区域
                 unexplored_frontiers = self._find_unexplored_frontiers(frontiers)
                 if len(unexplored_frontiers) > 0:
                     random_idx = np.random.randint(0, len(unexplored_frontiers))
                     best_frontier = unexplored_frontiers[random_idx]
-                    logger.info(f"randomly choose frontier point: {best_frontier}")
+                    logger.info(f"随机选择前沿点: {best_frontier}")
 
             self._last_stagnation_recovery = self._step_count
 
-
-        if best_value > 0.85:
-            # 1. make sure the exploration steps are enough
-            min_exploration_steps = 15  # at least 15 steps
+        # 增强的探索终止条件 - 修改
+        # 原逻辑: 仅基于单一置信度阈值
+        # 新逻辑: 多因素判断，包括目标验证、时间一致性和探索充分性
+        if best_value > 0.85:  # 高置信度
+            # 1. 确保最低探索步数
+            min_exploration_steps = 15  # 至少进行15步探索
             if self._step_count < min_exploration_steps:
-                logger.info(f"exploration steps are not enough({self._step_count}/{min_exploration_steps}), keep explore")
+                logger.info(f"探索步数不足({self._step_count}/{min_exploration_steps})，继续探索")
                 return self._pointnav(best_frontier)
 
-            # 2. target verification
+            # 2. 目标验证
             if self._verify_target_presence(observations):
-                logger.info(f"target verified, credibility={best_value:.2f}, switch to objNav")
+                logger.info(f"目标验证成功，置信度={best_value:.2f}，切换到目标导航")
+                # 标记找到目标
                 self._target_found = True
+                # 可以切换到目标导航或停止
                 return self._pointnav(best_frontier, stop=True)
             else:
-                logger.warning("High credibility but verified wrongly, keep explore")
+                logger.warning("高置信度但目标验证失败，继续探索")
 
-        # different stage exploration
+        # 针对不同探索阶段的策略调整 - 新增
         if exploration_phase == "initial":
-            # widely search, guangdu youxian
-            logger.debug("widely search initially")
-
+            # 初始探索阶段：广泛覆盖
+            logger.debug("初始探索阶段：优先覆盖范围")
+            # 可以在此调整探索参数
         elif exploration_phase == "focused":
-            # focus on  high value area, shendu youxian
-            logger.debug("focus on  high value area, shendu youxian")
+            # 聚焦探索阶段：关注高价值区域
+            logger.debug("聚焦探索阶段：关注高价值区域")
+            # 可以在此调整探索参数
+
+        # 标准探索行为
         return self._pointnav(best_frontier)
 
     def _get_best_frontier(
@@ -212,23 +233,26 @@ class BaseITMPolicy(BaseObjectNavPolicy):
         best_frontier = sorted_pts[best_frontier_idx]
         best_value = min(1.0, sorted_values[best_frontier_idx])
 
+        # 修改点: 替换简单的置信度阈值检查，增加多维度验证
         initial_value = best_value
 
-        if initial_value > 0.7:
-            # 1. verification of target
+        # 多维度置信度验证机制 - 新增
+        if initial_value > 0.7:  # 高置信度阈值
+            # 1. 目标检测验证
             target_detection_valid = False
             if 'object_detections' in observations:
                 detections = observations['object_detections']
                 if hasattr(detections, 'labels') and len(detections.labels) > 0:
                     for i, (label, score) in enumerate(zip(detections.labels, detections.scores)):
+                        # 匹配目标与当前任务目标
                         if self._is_target_object(label) and score > 0.4:
                             bbox = detections.boxes[i] if hasattr(detections, 'boxes') else None
-                            # verification of size and location
+                            # 验证检测是否合理（大小、位置）
                             if self._is_detection_reasonable(bbox, observations):
                                 target_detection_valid = True
                                 break
 
-            # 2. make it more smoothly, avoiding shunshi wucha
+            # 2. 时间一致性验证 - 防止瞬时误判
             temporal_valid = False
             if not hasattr(self, '_confidence_history') or not self._confidence_history:
                 recent_high_confidence = 0
@@ -237,16 +261,20 @@ class BaseITMPolicy(BaseObjectNavPolicy):
                 recent_items = history_list[-min(3, len(history_list)):]
                 recent_high_confidence = sum(1 for v in recent_items if v > 0.7)
 
-            temporal_valid = recent_high_confidence >= 2  # 2 slides high credibility
+            temporal_valid = recent_high_confidence >= 2  # 至少2/3帧高置信度
 
+            # 记录当前置信度
             self._confidence_history.append(initial_value)
 
+            # 3. 综合判断
             if target_detection_valid and temporal_valid:
+                # 验证通过，保持高置信度
                 best_value = initial_value
-                logger.info(f"Pass with high credibility {best_value:.2f}, obj detect is available")
+                logger.info(f"高置信度验证通过: {best_value:.2f}, 目标检测有效")
             else:
-                reduced_value = max(0.6, initial_value * 0.7)  # cut 30% but higher than 0.5
-                logger.warning(f"Fail with high credibility: {initial_value:.2f} -> {reduced_value:.2f}")
+                # 验证失败，降低置信度
+                reduced_value = max(0.6, initial_value * 0.7)  # 降低30%但不低于0.6
+                logger.warning(f"高置信度验证失败: {initial_value:.2f} -> {reduced_value:.2f}")
                 best_value = reduced_value
         else:
             best_value = initial_value
@@ -259,13 +287,18 @@ class BaseITMPolicy(BaseObjectNavPolicy):
         return best_frontier, best_value
 
     def _get_policy_info(self, detections: ObjectDetections) -> Dict[str, Any]:
+        """增强版策略信息接口，用于可视化"""
+        # 先获取基础策略信息
         policy_info = super()._get_policy_info(detections)
 
+        # 添加MM-Nav相关信息（如有）
         if self.use_mm_nav and self._memory is not None:
+            # 添加记忆点位置用于可视化
             memory_positions = self._memory.positions if hasattr(self._memory, 'positions') else []
             if memory_positions:
                 policy_info['memory_positions'] = np.array(memory_positions)
 
+            # 添加循环检测信息
             if self.enable_cycle_detection and hasattr(self._memory, 'detect_cycle'):
                 cycle_detected, cycle_info = self._memory.detect_cycle()
                 if cycle_detected:
@@ -273,54 +306,111 @@ class BaseITMPolicy(BaseObjectNavPolicy):
                     if cycle_info and 'segment' in cycle_info:
                         policy_info['cycle_segment'] = cycle_info['segment']
 
+        # 添加UA-Explore相关信息（如有）
+        if self.use_ua_explore and self._uncertainty_estimator is not None:
+            # 添加不确定性分布信息
+            if self._best_frontier is not None and self._frontiers is not None:
+                # 从上次排序中获取不确定性值
+                if hasattr(self, '_last_uncertainty_info'):
+                    policy_info['uncertainty_map'] = self._last_uncertainty_info.get('frontier_uncertainties', {})
+                    policy_info['uncertainty_threshold'] = self._last_uncertainty_info.get('threshold', 0.5)
+
+            # 添加探索策略信息
+            if self.enable_adaptive_explorer and self._adaptive_explorer is not None:
+                if hasattr(self._adaptive_explorer, 'strategy_history') and self._adaptive_explorer.strategy_history:
+                    latest_strategy = self._adaptive_explorer.strategy_history[-1]
+                    policy_info['exploration_strategy'] = latest_strategy.get('primary_strategy', 'balanced')
+                    policy_info['exploration_boost'] = latest_strategy.get('boost_exploration', False)
+
+
+            if hasattr(self, '_last_planner_state'):
+                planner_state = self._last_planner_state
+                current_subgoal = planner_state.get('current_subgoal')
+                navigation_hint = planner_state.get('navigation_hint')
+
+                if current_subgoal:
+                    policy_info['current_subgoal'] = current_subgoal.get('description', '')
+                    policy_info['subgoal_criteria'] = current_subgoal.get('criteria', '')
+
+                if navigation_hint:
+                    policy_info['navigation_hint'] = navigation_hint
 
         return policy_info
 
     def _update_habitat_visualizations(self, policy_info, observations):
+        """更新Habitat可视化信息，确保与habitat_visualizer.py无缝集成"""
+        # 创建附加可视化信息
         additional_info = []
 
+        # 添加MM-Nav相关信息
         if hasattr(self, 'use_mm_nav') and self.use_mm_nav and hasattr(self, '_memory') and self._memory is not None:
             memory_size = len(getattr(self._memory, 'positions', []))
             additional_info.append(f"Memory: {memory_size} pts")
 
+            # 添加循环检测信息
             cycle_count = 0
             if hasattr(self, '_coordinator') and hasattr(self._coordinator, 'cycle_detector'):
                 cycle_count = self._coordinator.cycle_detector.cycle_count
                 if cycle_count > 0:
                     additional_info.append(f"Cycles detected: {cycle_count}")
 
+        # 添加UA-Explore信息
+        if hasattr(self, 'use_ua_explore') and self.use_ua_explore and hasattr(self, '_uncertainty_estimator'):
+            if hasattr(self._uncertainty_estimator, 'threshold'):
+                threshold = self._uncertainty_estimator.threshold
+                additional_info.append(f"Uncertainty threshold: {threshold:.2f}")
 
+            # 添加探索策略信息
+            if hasattr(self, '_adaptive_explorer') and hasattr(self._adaptive_explorer, 'strategy_history'):
+                if self._adaptive_explorer.strategy_history:
+                    strategy = self._adaptive_explorer.strategy_history[-1].get('primary_strategy', '')
+                    if strategy:
+                        additional_info.append(f"Strategy: {strategy}")
+
+
+
+        # 添加性能信息
         if hasattr(self, '_metrics') and self._metrics:
             success_rate = self._metrics.success_rate
             spl = self._metrics.spl
             efficiency = self._metrics.trajectory_efficiency
             additional_info.append(f"SR: {success_rate:.2f} SPL: {spl:.2f} Eff: {efficiency:.2f}")
 
+        # 更新policy_info
         policy_info['additional_text'] = additional_info
 
+        # 创建记忆可视化图层
         if hasattr(self, '_memory') and self._memory is not None and hasattr(self._memory, 'positions'):
             memory_positions = self._memory.positions
             if memory_positions and len(memory_positions) > 0:
+                # 检查是否可以从观察中获取地图尺寸信息
                 if ('map_data' in observations and
                     'map_shape' in observations['map_data'] and
                     'world_to_map' in observations['map_data']):
 
+                    # 获取地图信息
                     map_shape = observations['map_data']['map_shape']
                     world_to_map = observations['map_data']['world_to_map']
 
+                    # 创建记忆轨迹可视化
                     memory_vis = np.zeros((map_shape[0], map_shape[1], 3), dtype=np.uint8)
 
+                    # 转换记忆位置到地图坐标
                     map_positions = []
                     for pos in memory_positions:
+                        # 确保位置格式正确
                         if len(pos) >= 2:
+                            # 应用坐标转换
                             map_x, map_y = int(pos[0] * world_to_map[0, 0] + world_to_map[0, 2]), int(pos[1] * world_to_map[1, 1] + world_to_map[1, 2])
                             if 0 <= map_x < map_shape[1] and 0 <= map_y < map_shape[0]:
                                 map_positions.append((map_x, map_y))
 
+                    # 绘制记忆轨迹
                     if len(map_positions) > 1:
                         for i in range(1, len(map_positions)):
                             cv2.line(memory_vis, map_positions[i-1], map_positions[i], (0, 255, 255), 1)
 
+                    # 将记忆可视化添加到策略信息中
                     policy_info['memory_visualization'] = memory_vis
 
     def _update_value_map(self) -> None:
@@ -346,51 +436,65 @@ class BaseITMPolicy(BaseObjectNavPolicy):
         )
 
     def _sort_frontiers_by_value(self, observations: "TensorDict", frontiers: np.ndarray) -> Tuple[np.ndarray, List[float]]:
-        # Use value_map directly for sorting
+        """基于多模块集成对前沿进行排序"""
+        # 直接使用value_map进行排序
         sorted_frontiers, values = self._value_map.sort_waypoints(frontiers, 0.5)
 
+        # 添加调试信息 - 新增
+        logger.info(f"原始前沿值: 最小={min(values):.2f}, 最大={max(values):.2f}, 均值={np.mean(values):.2f}")
 
-        if not self.use_mm_nav:
-            return sorted_frontiers, values
+
 
         if self._coordinator is None:
-            logger.warning("Enhancements are enabled but the coordinator is not initialized")
+            logger.warning("增强功能已启用但coordinator未初始化")
             return sorted_frontiers, values
 
+        # 记录原始值用于比较 - 新增
         original_values = np.array(values.copy())
 
         try:
+            # 确保values是numpy数组
             values_np = np.array(values)
+
+            # 调用决策协调器
             result = self._coordinator.integrate_decisions(
                 base_values=values_np,
                 memory=self._memory if self.use_mm_nav else None,
+                uncertainty_estimator=self._uncertainty_estimator if self.use_ua_explore else None,
+                adaptive_explorer=self._adaptive_explorer if self.enable_adaptive_explorer else None,
                 frontiers=sorted_frontiers,
                 observation=observations
             )
 
+            # 处理各种可能的返回类型
             if isinstance(result, dict):
                 enhanced_values = result.get('enhanced_values', values)
             elif isinstance(result, np.ndarray):
                 enhanced_values = result
             else:
                 enhanced_values = np.array(values)
-                logger.warning(f"decision returned unexpected value: {type(result)}")
+                logger.warning(f"决策整合返回了意外的类型: {type(result)}")
 
-            # Calculate the difference between the original value and the enhanced value
+            # 计算原始值与增强值的差异 - 新增
             value_diff = np.abs(enhanced_values - original_values)
             avg_diff = np.mean(value_diff)
             max_diff = np.max(value_diff)
 
+            # 输出调试信息 - 新增
+            logger.info(f"增强功能影响: 平均差异={avg_diff:.4f}, 最大差异={max_diff:.4f}")
+            logger.info(f"增强后前沿值: 最小={np.min(enhanced_values):.2f}, 最大={np.max(enhanced_values):.2f}, 均值={np.mean(enhanced_values):.2f}")
 
+            # 如果差异太小，发出警告 - 新增
             if avg_diff < 0.01:
-                logger.warning("The enhancement has little impact on the frontier value sorting, check the module configuration and weight settings")
+                logger.warning("增强功能几乎没有影响前沿值排序，检查模块配置和权重设置")
 
+            # 重新排序
             indices = np.argsort(-enhanced_values)
             sorted_frontiers = sorted_frontiers[indices]
             values = enhanced_values[indices].tolist()
 
         except Exception as e:
-            logger.error(f"Decision integration failed: {str(e)}")
+            logger.error(f"决策整合失败: {str(e)}")
 
             logger.error(traceback.format_exc())
             return sorted_frontiers, values
@@ -398,20 +502,23 @@ class BaseITMPolicy(BaseObjectNavPolicy):
         return sorted_frontiers, values
 
     def _is_target_object(self, label):
-        """Check if the label matches the target object"""
+        """检查标签是否与目标对象匹配"""
         if not hasattr(self, '_target_object'):
             return False
 
+        # 简单的字符串匹配
         target = self._target_object.lower()
         label = label.lower()
 
+        # 直接匹配
         if target == label:
             return True
 
+        # 部分匹配
         if target in label or label in target:
             return True
 
-        # Synonym matching
+        # 同义词匹配 (可以扩展)
         synonyms = {
             'couch': ['sofa', 'loveseat'],
             'tv': ['television', 'monitor', 'screen'],
@@ -464,25 +571,28 @@ class ITMPolicyV2(BaseITMPolicy):
 
         # 从环境变量读取配置
         self.use_mm_nav = os.environ.get('VLFM_USE_MEMORY', 'false').lower() == 'true'
-
+        self.use_ua_explore = os.environ.get('VLFM_USE_UNCERTAINTY', 'false').lower() == 'true'
         self.enable_memory_repulsion = os.environ.get('VLFM_MEMORY_REPULSION', 'false').lower() == 'true'
         self.enable_cycle_detection = os.environ.get('VLFM_CYCLE_DETECTION', 'false').lower() == 'true'
+        self.enable_adaptive_explorer = os.environ.get('VLFM_ADAPTIVE_EXPLORER', 'false').lower() == 'true'
 
-
+        # 初始化核心模块
         self._initialize_core_modules()
 
-
+        # 初始化决策协调器
         self._initialize_decision_coordinator()
 
+        # 打印配置信息
+        logger.info(f"ITMPolicyV2初始化 - 实际配置: MM-Nav={self.use_mm_nav}, UA-Explore={self.use_ua_explore}")
 
-
-
+        # 添加状态管理
         self._high_confidence_detected = False
-        self._confidence_threshold = 0.8
-        self._consecutive_high_confidence = 0
+        self._confidence_threshold = 0.8  # 可配置的置信度阈值
+        self._consecutive_high_confidence = 0  # 连续高置信度计数
 
     def _initialize_core_modules(self):
-        # MM-Nav
+        """初始化VLFM核心模块，包含错误处理"""
+        # 1. 空间记忆模块 (MM-Nav)
         if self.use_mm_nav:
             try:
                 memory_config = type('MemoryConfig', (), {
@@ -495,34 +605,61 @@ class ITMPolicyV2(BaseITMPolicy):
                     'cycle_similarity_threshold': 0.75
                 })
                 self._memory = SpatialMemory(memory_config)
-                # logger.info("初始化MM-Nav空间记忆模块")
+                logger.info("初始化MM-Nav空间记忆模块")
             except Exception as e:
-                logger.error(f"MM-Nav initialization failed: {str(e)}")
+                logger.error(f"MM-Nav初始化失败: {str(e)}")
                 self._memory = None
-                self.use_mm_nav = False
+                self.use_mm_nav = False  # 禁用功能
         else:
             self._memory = None
+
+        # 2. 不确定性估计模块 (UA-Nav)
+        if self.use_ua_explore:
+            uncertainty_config = type('UncertaintyConfig', (), {
+                'base_threshold': 0.5,
+                'threshold_decay': 0.98,
+                'min_threshold': 0.1,
+                'max_threshold': 0.8,
+                'monte_carlo_samples': 10,
+                'max_steps': int(os.environ.get('VLFM_MAX_STEPS', '250'))
+            })
+            self._uncertainty_estimator = UncertaintyEstimator(uncertainty_config)
+            logger.info("初始化UA-Nav不确定性估计模块")
+        else:
+            self._uncertainty_estimator = None
+
+        # 3. 自适应探索器
+        if self.enable_adaptive_explorer:
+            explorer_config = type('ExplorerConfig', (), {
+                'max_steps': int(os.environ.get('VLFM_MAX_STEPS', '250')),
+                'stagnation_threshold': 30,
+                'efficiency_factor': 0.5
+            })
+            self._adaptive_explorer = AdaptiveExplorer(explorer_config)
+            logger.info("初始化自适应探索器")
+        else:
+            self._adaptive_explorer = None
 
 
 
     def _initialize_decision_coordinator(self):
-        """Initialize the decision coordinator"""
-        if self.use_mm_nav:
+        """初始化决策协调器"""
+        if self.use_mm_nav or self.use_ua_explore:
             coordinator_config = type('Config', (), {
-                'memory_weight': 1,
-                # 'uncertainty_weight': 0.3,
-                # 'semantic_weight': 0.3,
+                'memory_weight': 0.2,
+                'uncertainty_weight': 0.8,
+                'semantic_weight': 0,
                 'cycle_threshold': 8,
                 'log_enabled': True,
-
+                # 传递配置值
                 'use_mm_nav': self.use_mm_nav,
-                # 'use_ua_explore': self.use_ua_explore,
-                # 'use_llm_gsp': self.use_llm_gsp,
+                'use_ua_explore': self.use_ua_explore,
                 'enable_memory_repulsion': self.enable_memory_repulsion,
                 'enable_cycle_detection': self.enable_cycle_detection,
+                'enable_adaptive_explorer': self.enable_adaptive_explorer,
             })
             self._coordinator = DecisionCoordinator(coordinator_config)
-            # logger.info("初始化决策协调器")
+            logger.info("初始化决策协调器")
         else:
             self._coordinator = None
 
@@ -534,6 +671,17 @@ class ITMPolicyV2(BaseITMPolicy):
         masks: Tensor,
         deterministic: bool = False,
     ) -> Any:
+        # 状态检查 - 新增
+        if self._step_counter % 10 == 0:  # 每10步输出一次状态
+            logger.info(f"功能状态检查 [步骤 {self._step_counter}]:")
+            logger.info(f"- MM-Nav: {self.use_mm_nav} (记忆模块: {'已初始化' if self._memory is not None else '未初始化'})")
+            logger.info(f"- UA-Nav: {self.use_ua_explore} (不确定性估计器: {'已初始化' if self._uncertainty_estimator is not None else '未初始化'})")
+            logger.info(f"- 决策协调器: {'已初始化' if self._coordinator is not None else '未初始化'}")
+
+            # 如果启用UA-Nav，提供额外信息
+            if self.use_ua_explore and self._uncertainty_estimator is not None:
+                logger.info(f"  - 不确定性历史: {len(self._uncertainty_estimator.uncertainty_history)} 条记录")
+                logger.info(f"  - 访问计数记录: {len(self._uncertainty_estimator.visit_counts)} 个位置")
 
         self._pre_step(observations, masks)
         self._update_value_map()
@@ -542,35 +690,36 @@ class ITMPolicyV2(BaseITMPolicy):
     def _sort_frontiers_by_value(
         self, observations: "TensorDict", frontiers: np.ndarray
     ) -> Tuple[np.ndarray, List[float]]:
+        # 直接使用value_map进行排序
         sorted_frontiers, values = self._value_map.sort_waypoints(frontiers, 0.5)
 
-        # logger.debug(f"original frontiers: {values[:5]}...")  # 只显示前5个值
+        logger.debug(f"原始前沿值: {values[:5]}...")  # 只显示前5个值
 
-        if not self.use_mm_nav:
-            # logger.debug("Enhancements are not enabled, original sorting is used")
-            return sorted_frontiers, values
+
 
         if self._coordinator is None:
-            # logger.warning("Enhancements are enabled but the coordinator is not initialized")
+            logger.warning("增强功能已启用但coordinator未初始化")
             return sorted_frontiers, values
 
         try:
             result = self._coordinator.integrate_decisions(
                 base_values=values,
                 memory=self._memory if self.use_mm_nav else None,
+                uncertainty_estimator=self._uncertainty_estimator if self.use_ua_explore else None,
+                adaptive_explorer=self._adaptive_explorer if self.enable_adaptive_explorer else None,
                 frontiers=sorted_frontiers,
                 observation=observations
             )
 
             if isinstance(result, dict):
                 enhanced_values = result.get('enhanced_values', values)
-                # logger.debug(f"Enhanced frontier value: {enhanced_values[:5]}...")
+                logger.debug(f"增强后的前沿值: {enhanced_values[:5]}...")
             elif isinstance(result, np.ndarray):
                 enhanced_values = result
-                # logger.debug(f"Enhanced frontier value: {enhanced_values[:5]}...")
+                logger.debug(f"增强后的前沿值: {enhanced_values[:5]}...")
             else:
                 enhanced_values = np.array(values)
-                logger.warning("Decision integration returned an unexpected type")
+                logger.warning("决策整合返回了意外的类型")
 
             # 重新排序
             indices = np.argsort(-enhanced_values)
@@ -578,60 +727,83 @@ class ITMPolicyV2(BaseITMPolicy):
             values = enhanced_values[indices].tolist()
 
         except Exception as e:
-            logger.error(f"Decision integration failed: {str(e)}")
+            logger.error(f"决策整合失败: {str(e)}")
             return sorted_frontiers, values
 
         return sorted_frontiers, values
 
     def _reset(self):
+        """重置策略状态"""
         super()._reset()
+
+        # 重置frontier相关属性
         self._best_frontier = None
         self._frontiers = None
 
-
+        # 重置增强模块
         if hasattr(self, '_memory') and self._memory is not None:
             self._memory.reset()
+            logger.info("重置记忆模块")
 
+        if hasattr(self, '_uncertainty_estimator') and self._uncertainty_estimator is not None:
+            self._uncertainty_estimator.reset()
+            logger.info("重置不确定性估计器")
 
+        if hasattr(self, '_adaptive_explorer') and self._adaptive_explorer is not None:
+            self._adaptive_explorer.reset()
+            logger.info("重置自适应探索器")
 
+        # 重置语义规划器
+        if hasattr(self, '_semantic_planner') and self._semantic_planner is not None:
+            self._semantic_planner.reset()
+            logger.info("重置语义规划器")
 
+        # 重置决策协调器
         if hasattr(self, '_coordinator') and self._coordinator is not None:
             self._coordinator.reset()
 
+        # 重置性能指标
         if hasattr(self, '_metrics') and self._metrics is not None:
+            # 当策略实例重用时保存旧指标
             if hasattr(self, '_archive_metrics') and self._metrics.episode_count > 0:
                 if not isinstance(self._archive_metrics, list):
                     self._archive_metrics = []
                 self._archive_metrics.append(self._metrics.get_summary())
+
+            # 初始化新的指标收集器
             self._metrics = PerformanceMetrics()
 
     def _extract_position(self, observations):
+        """从观察中提取当前位置"""
         if 'gps' in observations:
             return observations['gps'].cpu().numpy()[0]
-        return np.zeros(2)
+        return np.zeros(2)  # 默认位置
 
-    def _update_value_map(self):
-        super()._update_value_map()
 
 
     def _extract_position(self, observations):
+        """从观察中提取当前位置"""
         if 'gps' in observations:
             return observations['gps'].cpu().numpy()[0]
         return np.zeros(2)  # 默认位置
 
     def _extract_features(self, observations):
-        """Extract key features of observations"""
+        """提取观察的关键特征"""
         features = {}
 
+        # 提取位置
         if 'gps' in observations:
             features['position'] = observations['gps'].cpu().numpy()[0]
 
+        # 提取朝向
         if 'compass' in observations:
             compass = observations['compass'].cpu().numpy()[0]
             features['heading'] = compass
 
+        # 提取当前步数
         features['step_count'] = self._step_count
 
+        # 提取物体检测结果
         if 'object_detections' in observations:
             detections = observations['object_detections']
             if hasattr(detections, 'labels'):
@@ -640,10 +812,10 @@ class ITMPolicyV2(BaseITMPolicy):
         return features
 
     def _check_state_transition(self, best_value):
-        """Check if state transition is required"""
+        """检查是否需要状态转换"""
         if best_value > self._confidence_threshold:
             self._consecutive_high_confidence += 1
-            # The conversion is triggered only after 3 consecutive high confidences to avoid noise
+            # 连续3次高置信度才触发转换，避免噪声
             if self._consecutive_high_confidence >= 3:
                 return True
         else:
@@ -651,62 +823,71 @@ class ITMPolicyV2(BaseITMPolicy):
         return False
 
     def _get_exploration_phase(self):
-        """Determine the current exploration stage"""
+        """确定当前探索阶段"""
+        # 确保全局logger可用
         global logger
 
-        # Make sure to have exploration coverage tracking
+        # 首先确保有探索覆盖率跟踪
         if not hasattr(self, '_exploration_coverage'):
+            # 初始化探索覆盖率跟踪
             self._exploration_coverage = 0.0
-            # logger.debug("初始化探索覆盖率跟踪")
+            logger.debug("初始化探索覆盖率跟踪")
 
-        # Use the correct step counter
+        # 使用正确的步数计数器
         if self._step_counter < 10:
-            return "initial"
+            return "initial"  # 初始探索
         elif self._exploration_coverage > 0.4 or self._step_counter > 30:
-            return "focused"
+            return "focused"  # 聚焦探索
         else:
-            return "standard"
+            return "standard"  # 标准探索
 
     def _verify_target_presence(self, observations):
+        """多因素目标验证"""
         try:
-
-            # Check target detection
+            # 检查目标检测
             if 'object_detections' in observations:
                 detections = observations['object_detections']
                 if hasattr(detections, 'labels') and len(detections.labels) > 0:
                     for i, (label, score) in enumerate(zip(detections.labels, detections.scores)):
+                        # 确保_is_target_object方法存在，否则使用简单匹配
                         if hasattr(self, '_is_target_object'):
                             is_target = self._is_target_object(label)
                         else:
+                            # 后备方案：简单字符串匹配
                             is_target = self._target_object.lower() in label.lower()
 
-                        if is_target and score > 0.65:  # ori: 0.8
+                        if is_target and score > 0.65:  # 原来可能是0.8或更高
                             return True
 
-            # No target detected
+            # 未检测到目标
             return False
         except Exception as e:
-            logger.error(f"Target verification failed: {str(e)}")
-            return False
+            logger.error(f"目标验证失败: {str(e)}")
+            return False  # 出错时保守返回
 
     def _detect_exploration_stagnation(self, observations=None):
+        """探索停滞检测"""
+        # 确保全局logger可用
         global logger
 
         try:
+            # 确保位置历史存在
             if not hasattr(self, '_position_history'):
                 self._position_history = deque(maxlen=10)
 
+            # 安全获取当前位置
             if observations is None:
-                # If no observations are provided, the most recent location is used
+                # 如果没有提供observations，使用最近位置
                 if len(self._position_history) > 0:
                     current_pos = self._position_history[-1]
                 else:
-                    return False
+                    return False  # 无法判断停滞
             else:
                 current_pos = self._extract_position(observations)
 
             self._position_history.append(current_pos)
 
+            # 检测位置变化不大
             if len(self._position_history) > 5:
                 recent_positions = list(self._position_history)[-5:]
                 distances = []
@@ -717,12 +898,189 @@ class ITMPolicyV2(BaseITMPolicy):
                 avg_movement = np.mean(distances)
                 # 平均移动距离很小表示停滞
                 if avg_movement < 0.3:
-                    logger.debug(f"Exploration stagnation detected: average distance moved={avg_movement:.2f}")
+                    logger.debug(f"检测到探索停滞：平均移动距离={avg_movement:.2f}")
                     return True
 
             return False
         except Exception as e:
-            logger.error(f"Exploration Stagnation Detection Failure：{str(e)}")
+            logger.error(f"探索停滞检测失败：{str(e)}")
             return False
 
 
+class ITMPolicyV3(ITMPolicyV2):
+    def __init__(self, exploration_thresh: float, *args: Any, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        self._exploration_thresh = exploration_thresh
+
+        def visualize_value_map(arr: np.ndarray) -> np.ndarray:
+            # Get the values in the first channel
+            first_channel = arr[:, :, 0]
+            # Get the max values across the two channels
+            max_values = np.max(arr, axis=2)
+            # Create a boolean mask where the first channel is above the threshold
+            mask = first_channel > exploration_thresh
+            # Use the mask to select from the first channel or max values
+            result = np.where(mask, first_channel, max_values)
+
+            return result
+
+        self._vis_reduce_fn = visualize_value_map  # type: ignore
+
+    def _sort_frontiers_by_value(
+        self, observations: "TensorDict", frontiers: np.ndarray
+    ) -> Tuple[np.ndarray, List[float]]:
+        sorted_frontiers, sorted_values = self._value_map.sort_waypoints(frontiers, 0.5, reduce_fn=self._reduce_values)
+
+        return sorted_frontiers, sorted_values
+
+    def _reduce_values(self, values: List[Tuple[float, float]]) -> List[float]:
+        """
+        Reduce the values to a single value per frontier
+
+        Args:
+            values: A list of tuples of the form (target_value, exploration_value). If
+                the highest target_value of all the value tuples is below the threshold,
+                then we return the second element (exploration_value) of each tuple.
+                Otherwise, we return the first element (target_value) of each tuple.
+
+        Returns:
+            A list of values, one per frontier.
+        """
+        target_values = [v[0] for v in values]
+        max_target_value = max(target_values)
+
+        if max_target_value < self._exploration_thresh:
+            explore_values = [v[1] for v in values]
+            return explore_values
+        else:
+            return [v[0] for v in values]
+
+    def _sort_frontiers_by_value(self, observations: "TensorDict", frontiers: np.ndarray) -> Tuple[np.ndarray, List[float]]:
+        """
+        增强型前沿排序 - 与性能监控集成
+
+        Args:
+            observations: 观察数据
+            frontiers: 前沿点
+
+        Returns:
+            sorted_frontiers: 排序后的前沿点
+            sorted_values: 对应的价值
+        """
+        # 测量性能开始时间
+        start_time = time.time()
+
+        # 获取基础值
+        base_values = self._base_get_frontier_values(observations, frontiers)
+
+        # 应用增强模块
+        enhanced_values = base_values
+
+        # 应用决策集成
+        if hasattr(self, "_coordinator") and self._coordinator is not None:
+            # 传递观察、前沿和模块给协调器
+            enhanced_values = self._coordinator.integrate_decisions(
+                base_values=base_values,
+                memory=self._memory if hasattr(self, "_memory") else None,
+                uncertainty_estimator=self._uncertainty_estimator if hasattr(self, "_uncertainty_estimator") else None,
+                semantic_planner=self._semantic_planner if hasattr(self, "_semantic_planner") else None,
+                adaptive_explorer=self._adaptive_explorer if hasattr(self, "_adaptive_explorer") else None,
+                frontiers=frontiers,
+                observation=observations
+            )
+
+        # 更新不确定性估计器
+        if hasattr(self, "_uncertainty_estimator") and self._uncertainty_estimator is not None:
+            self._uncertainty_estimator.update_from_frontier_values(frontiers, enhanced_values)
+
+        # 记录性能指标
+        computation_time = time.time() - start_time
+        if hasattr(self, "_metrics") and self._metrics is not None:
+            self._metrics.update_ua_explore_metrics(decision_time=computation_time)
+
+        # 排序前沿
+        indices = np.argsort(enhanced_values)[::-1]
+
+        # 返回排序结果
+        return frontiers[indices], [enhanced_values[i] for i in indices]
+
+    def act(self, observations: Dict, rnn_hidden_states: Any, prev_actions: Any, masks: Tensor, deterministic: bool = False) -> Any:
+        """
+        增强型行为函数 - 与指标监控集成
+
+        Args:
+            observations: 观察数据
+            rnn_hidden_states: RNN隐藏状态
+            prev_actions: 前一步动作
+            masks: 掩码
+            deterministic: 是否确定性
+
+        Returns:
+            action: 选择的动作
+        """
+        # 测量性能开始时间
+        start_time = time.time()
+
+        # 提取当前位置
+        position = self._extract_position(observations)
+
+        # 更新记忆
+        if hasattr(self, "_memory") and self._memory is not None:
+            self._memory.add_position(position)
+
+        # 执行标准行为选择
+        action, value = super().act(observations, rnn_hidden_states, prev_actions, masks, deterministic)
+
+        # 更新决策协调器
+        if hasattr(self, "_coordinator") and self._coordinator is not None:
+            self._coordinator.update_action(action.item())
+
+        # 记录性能指标
+        total_time = time.time() - start_time
+        if hasattr(self, "_metrics") and self._metrics is not None:
+            # 记录动作选择时间
+            self._metrics.update_ua_explore_metrics(decision_time=total_time)
+
+        return action, value
+
+    def _reset(self) -> None:
+        """
+        重置函数 - 确保所有增强模块都正确重置
+        """
+        # 调用基类重置
+        super()._reset()
+
+        # 重置frontier相关属性
+        self._best_frontier = None
+        self._frontiers = None
+
+        # 重置记忆模块
+        if hasattr(self, '_memory') and self._memory is not None:
+            self._memory.reset()
+
+        # 重置不确定性估计器
+        if hasattr(self, '_uncertainty_estimator') and self._uncertainty_estimator is not None:
+            self._uncertainty_estimator.reset()
+
+        # 重置自适应探索器
+        if hasattr(self, '_adaptive_explorer') and self._adaptive_explorer is not None:
+            self._adaptive_explorer.reset()
+
+        # 重置语义规划器
+        if hasattr(self, '_semantic_planner') and self._semantic_planner is not None:
+            self._semantic_planner.reset()
+
+        # 重置决策协调器
+        if hasattr(self, '_coordinator') and self._coordinator is not None:
+            self._coordinator.reset()
+
+        # 重置性能指标
+        if hasattr(self, '_metrics') and self._metrics is not None:
+            # 当策略实例重用时保存旧指标
+            if hasattr(self, '_archive_metrics') and self._metrics.episode_count > 0:
+                if not isinstance(self._archive_metrics, list):
+                    self._archive_metrics = []
+                self._archive_metrics.append(self._metrics.get_summary())
+
+            # 初始化新的指标收集器
+            self._metrics = PerformanceMetrics()
