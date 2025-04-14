@@ -376,7 +376,7 @@ class DecisionCoordinator:
             # 核心修复：加权组合所有模块的贡献
             if active_modules:
                 # 初始化为基础值的一部分权重
-                base_weight = 0.15  # 给基础值保留20%的权重
+                base_weight = 0.01  # 给基础值保留20%的权重
                 enhanced_values = base_values.copy() * base_weight
                 
                 # 计算剩余权重
