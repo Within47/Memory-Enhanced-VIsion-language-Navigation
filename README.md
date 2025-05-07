@@ -79,7 +79,4 @@ Example: Run MM-Nav only with 300 steps
 | Only Memory-Augmention     | 52.30    | 0.3066  | 5.03      |
 | Only Uncertainty-Awareness | 52.70    | 0.3065  | 3.03      |
 | **Full version**           | **53.36**| **0.3193** | 3.26      |
-### Demo Video
-<video controls width="80%">
-  <source src="[demo.mp4](https://github.com/Within47/Memory-Enhanced-VIsion-language-Navigation/blob/main/demo.mp4)" type="video/mp4">
-</video>
+### Demo Video(./demo.mp4)
