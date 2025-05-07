@@ -71,3 +71,15 @@ Example: Run MM-Nav only with 300 steps
    ```bash
    bash ./scripts/run_vlfm_test.sh MM-Nav 300
    ```
+
+## 3. Final Results and demo
+| Method                     | SR (%) ↑ | SPL ↑   | Yaw (°) ↓ |
+|----------------------------|----------|---------|-----------|
+| Baseline                   | 52.40    | 0.3036  | 2.40      |
+| Only Memory-Augmention     | 52.30    | 0.3066  | 5.03      |
+| Only Uncertainty-Awareness | 52.70    | 0.3065  | 3.03      |
+| **Full version**           | **53.36**| **0.3193** | 3.26      |
+### Demo Video
+<video controls width="80%">
+  <source src="demo.mp4" type="video/mp4">
+</video>
