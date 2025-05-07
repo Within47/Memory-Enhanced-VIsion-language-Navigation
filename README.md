@@ -81,5 +81,5 @@ Example: Run MM-Nav only with 300 steps
 | **Full version**           | **53.36**| **0.3193** | 3.26      |
 ### Demo Video
 <video controls width="80%">
-  <source src="demo.mp4" type="video/mp4">
+  <source src="[demo.mp4](https://github.com/Within47/Memory-Enhanced-VIsion-language-Navigation/blob/main/demo.mp4)" type="video/mp4">
 </video>
